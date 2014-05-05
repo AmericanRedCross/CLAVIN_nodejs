@@ -9,7 +9,7 @@ At the Red Cross we create a lot of documents. This service builds on the [CLAVI
 Service Endpoint
 -----------------
 
-There is currently only one endpoint for all services [http://webviz.redcross.org:4000/geodoc/](http://webviz.redcross.org/geodoc/).
+There is currently only one endpoint for all services [http://webviz.redcross.org/geodoc/](http://webviz.redcross.org/geodoc/).
 
 The service returns a either a JSON or JSONP object by posting arguments with the document name and text to be parsed.
 
@@ -27,7 +27,7 @@ var postArgs = {
   text: "I really like the food in France but my favorite food is from India."
 };
 
-var url = 'http://webviz.redcross.org:4000/geodoc/';
+var url = 'http://webviz.redcross.org/geodoc/';
 
 //Send POST, using JSONP
 $.getJSON(url + "?callback=?", postArgs).done(function (data) {
@@ -66,6 +66,25 @@ callback && callback({
     }
   ]
 });
+```
+
+Sometimes the text doesn't have any place names. In that case you'll get the below response.
+
+Sample Null Response:
+```javascript
+{
+   "documentName":"testDoc",
+   "date":"2013-10-29T02:49:59.678Z",
+   "resolvedLocations":[
+      {
+         "name":"None Found",
+         "centroid":{
+            "lat":"",
+            "lng":""
+         }
+      }
+   ]
+}
 ```
 
 Disclaimer

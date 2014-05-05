@@ -1,19 +1,21 @@
-
 var pg = require('pg'),
+url = require('url'),
 loggly = require('loggly'),
 ga = require('nodealytics'),
-fs = require('fs'),
-async = require('async'),
 settings = require('../settings');
+
+var conString = "postgres://" + settings.pg.username + ":" + settings.pg.password + "@" + settings.pg.server + ":" + settings.pg.port + "/" + settings.pg.database;
+
 
 //Configure Loggly (logging API)
 var config = {
-	subdomain: settings.loggly.subdomain,
-	auth: {
-		username: settings.loggly.username,
-		password: settings.loggly.password
-	},
-	json: true
+    token: settings.loggly.token,
+    subdomain: settings.loggly.subdomain,
+    auth: {
+        username: settings.loggly.username,
+        password: settings.loggly.password
+    },
+    json: true
 };
 
 //Loggly client
@@ -23,114 +25,175 @@ var logclient = loggly.createClient(config);
 ga.initialize(settings.ga.key, 'webviz.redcross.org', function () {
 });
 
-exports.gdpcClavin = function(req,res) {
-	var docs = req.body;
-	var queryResponse = [];
+//Take in results object, return GeoJSON (if there is geometry)
+function geoJSONFormatter(rows, geom_fields_array) {
+    //Take in results object, return GeoJSON
+    if (!geom_fields_array) {
+    geom_fields_array = ["geom"]
+    } //default
 
-	if (docs.length > 1) {
-		res.end('Only submit one document at a time.');
-	}
+    //Loop thru results
+    var featureCollection = { "type": "FeatureCollection", "features": [] };
 
-	var gdpcCommand = 'sudo cp '+ settings.filepath.filename + ' ' + settings.filepath.clavin + ' && cd ../CLAVIN && MAVEN_OPTS="-Xmx2048M" mvn exec:java -Dexec.mainClass="com.bericotech.clavin.gdpc"';
-	var exec = require('child_process').exec;
-	
+    rows.forEach(function (row) {
+        // log(row['geometry']);
+        var feature = { "type": "Feature", "properties": {} };
+        //Depending on whether or not there is geometry properties, handle it.  If multiple geoms, use a GeometryCollection output for GeoJSON.
+        if (geom_fields_array && geom_fields_array.length == 1) {
+            //single geometry
+            if (row[geom_fields_array[0]]) {
+                feature.geometry = JSON.parse(row[geom_fields_array[0]]);
+                //remove the geometry property from the row object so we're just left with non-spatial properties
+                delete row[geom_fields_array[0]];
+            }
+        }
+        else if (geom_fields_array && geom_fields_array.length > 1) {
+            //if more than 1 geom, make a geomcollection property
+            feature.geometry = { "type": "GeometryCollection", "geometries": [] };
+            geom_fields_array.forEach(function (item) {
+                feature.geometry.geometries.push(row[item]);
+                //remove the geometry property from the row object so we're just left with non-spatial properties
+                delete row[item];
+            });
+        }
 
-	fs.writeFile(settings.filepath.filename, docs[0].text, function(err) {
-		if(err) {
-			log(err);
-		} else {
-			// log("The file " + docs[0].name + " was saved!");
-		}
-	});
+        //handle centroids
+        if (row.centroid) {
+            row.centroid = row.centroid.replace("POINT(", "").replace(")", "").split(" "); //split WKT into a coordinate array [x,y]
+        }
 
-	var parseClavin = function(clavin, callback) {
-		async.waterfall([
-			function(callback) {
-				var makePlacesResult;
-				async.map(clavin, makePlaces, function(err, result) {
-					makePlacesResult = result;
-				});
+        feature.properties = row;
+        featureCollection.features.push(feature);
 
-				callback(null, makePlacesResult);
-			},
-			function(places, callback){
-		    	//create final response
-		    	var uniques = {};
-		    	uniques.documentName = docs[0].name;
-		    	uniques.date = new Date();
-		    	uniques.resolvedLocations = [];
+        //final check
+        if (feature.properties.geometry) {
+            feature.geometry = feature.properties.geometry;
+            delete feature.properties.geometry;
+        }
+    })
 
-		    	//locations array
-		  		for(i=0;i<places.length;i++){
-		  			var location = {};
-		  			location.name = places[i];
-		  			location.centroid = {'lat': '', 'lng':''};
-		  			uniques.resolvedLocations.push(location);
-		  		}
+    return featureCollection;
+};
 
-		    	callback(null, uniques);
-		    }
-		], function (err, result) {
-		   callback(result);  
-		});
-	}
+exports.neBorders = function(req, res) {
+    var args = url.parse(req.url, true).query;
+    var qType;
+    var getID2 = [];
+    var params = [];
 
-	var myObj = {};
+    if (!args.year) {
+        args.year = new Date().getFullYear();
+    }
 
-	myObj.list = function(callback){
-		var result;
-		exec(gdpcCommand, function (error, stdout, stderr) {
-			callback(stdout);
-		});
-	}
+    if (!args.geom) {
+        args.geom = 'high';
+    }
 
-	myObj.list(function (stdout) {
-		var cS = stdout.indexOf('Resolved');
-		var cE = stdout.indexOf('All Done')-3;
-		var clavinRep = stdout.substring(cS,cE).split('#$#$');
-		// clavinRep = clavinRep.split('#$#$');
+    if (!args.qtype) {
+        args.qtype = 'iso';
+    }
 
-		//log(stdout);
+    //fix the case problem
+    args.geom.toLowerCase();
+    args.qtype.toLowerCase();
 
-		parseClavin(clavinRep, function(places) {
-			res.jsonp(places);
-		});
-	});
+    switch (args.geom) {
+        case 'original':
+            args.geom = 'geom';
+            break;
+        case 'high':
+            args.geom = 'geom_simplify_high';
+            break;
+        case 'med':
+            args.geom = 'geom_simplify_med';
+            break;
+        case 'quick':
+            break;
+        default:
+            args.geom = 'geom_simplify_high';
+    }
 
-}
+    switch (args.qtype) {
+        case 'iso':
+            qColumn = 'adm0_a3';
+            qType = 'iso';
+            break;
+        case 'name':
+            qColumn = 'name'
+            qType = 'name';
+            break;
+    }
+
+        //Grab POST or QueryString args depending on type
+    if (req.method.toLowerCase() == 'post') {
+        var getID = req.body;
+
+        for(var i=0;i<getID.length;i++){
+            if (qType == 'iso') {
+                getID2.push(getID[i].iso);
+            } else {
+                getID2.push(getID[i].name);
+            }
+            params.push('$'+(i+1));
+        }
+    }
+    else if (req.method.toLowerCase() == 'get') {
+        var getID = req.params.id;
+        getID2.push(getID);
+        params.push('$1');
+    }
+
+    // log(params);
+    // log(args);
+    // log(getID);
+
+    var client = new pg.Client(conString);
+    client.connect();
+
+    if (getID != 'world') {
+        var queryText = "SELECT name, year, adm0_a3, ST_AsGeoJSON("+ args.geom + ")::json AS geometry FROM naturalearth0";
+        queryText += " WHERE "+qColumn+" IN("+params.join(",")+")";
+        var query = client.query(queryText, getID2);
+
+        query.on("row", function (row, response) {
+            response.addRow(row);
+        });
+
+        //Handle query error - fires before end event
+        query.on('error', function (error) {
+            res.status = 'error';
+            res.message = error;
+            log('error \n' + error);
+        });
+
+        query.on("end", function (response) {
+            log('query executed \n' + queryText);
+            var resFormated = geoJSONFormatter(response.rows);
+            res.setHeader('Content-Type', 'application/json');
+
+            if (args.callback) {
+                res.jsonp(resFormated);
+            } else {
+                res.send(200,resFormated);
+            }
+
+            client.end();
+        });
+    } else {
+        var worldJSON = require('../worldcountries.json');
+        log('worldJSON is being called');
+
+        if (args.callback) {
+            res.jsonp(worldJSON);
+        } else {
+            res.send(200,worldJSON);
+        }
+    }
+};
 
 //Utilities
 function log(message) {
     //Write to console and to loggly
     logclient.log(settings.loggly.logglyKey, message);
     console.log(message);
-}
-
-function makePlaces(places, callback) {
-		var placesArr = [];
-
-		var pS1 = places.indexOf('{') + 1;
-		var pE1 = places.indexOf('(') - 1;
-		var pS2 = pE1 + 2;
-		var pE2 = places.indexOf(',');
-		var pS3 = pE2 + 1;
-		var pE3 = places.indexOf(')');
-
-		var place1 = places.substring(pS1,pE1);
-		var place2 = places.substring(pS2,pE2);
-		var place3 = places.substring(pS3,pE3);
-
-		if (place2 != 'United States') {
-			if (place3 != ' 00') {
-				placesArr.push(place1, place2, place3);
-			} else {
-				placesArr.push(place1, place2);
-			}
-			
-		} else {
-			placesArr.push(place1 + ',' + place3, place2);
-		}
-
-		// log(placesArr);
-		callback(null, placesArr);
 }
